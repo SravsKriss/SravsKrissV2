@@ -26,13 +26,38 @@ class VideoProcessor:
         self.temp_frames_dir = os.path.join(output_dir, "temp_frames")
         if not os.path.exists(self.temp_frames_dir):
             os.makedirs(self.temp_frames_dir)
+            
+        from utils.device_manager import device_manager
+        self.device_manager = device_manager
+        
+        self.temp_frames_dir = os.path.join(output_dir, "temp_frames")
+        if not os.path.exists(self.temp_frames_dir):
+            os.makedirs(self.temp_frames_dir)
 
     def process_tracking(self, mode: str, 
                          progress_callback: Callable = None, 
                          bbox: Tuple = None) -> CameraPath:
-        """Runs the tracking process based on the selected mode."""
+        """Runs the tracking process based on the selected mode with optimization."""
+        from utils.cache_manager import cache_manager
+        
+        video_hash = cache_manager.get_video_hash(self.video_path)
+        cached_data = cache_manager.load_tracking_data(video_hash, mode)
+        
+        if cached_data and not bbox: # Can't easily cache manual bbox tracking unless bbox matches
+            if progress_callback:
+                progress_callback(1.0, "Loading tracking data from cache...")
+            path_manager = CameraPath(self.total_frames)
+            # Assuming raw_points is a list of [frame_idx, data]
+            for frame_idx, data in cached_data.get('raw_points', []):
+                path_manager.add_raw_point(int(frame_idx), data)
+            return path_manager
+
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         path_manager = CameraPath(self.total_frames)
+        
+        # Optimization: Track at lower resolution
+        track_height = 720
+        scale = track_height / self.height if self.height > track_height else 1.0
         
         if mode == "AI Auto Tracking":
             detector = PoseDetector()
@@ -40,24 +65,39 @@ class VideoProcessor:
                 ret, frame = self.cap.read()
                 if not ret:
                     break
-                _, center = detector.find_pose(frame, draw=False)
-                if center:
-                    path_manager.add_raw_point(i, center)
                 
-                if progress_callback:
+                # Resize for speed
+                if scale < 1.0:
+                    small_frame = cv2.resize(frame, (0, 0), fx=scale, fy=scale)
+                else:
+                    small_frame = frame
+                
+                _, center = detector.find_pose(small_frame, draw=False)
+                if center:
+                    # Rescale coordinates back to original resolution
+                    orig_center = {
+                        "x": center['x'] / scale,
+                        "y": center['y'] / scale
+                    }
+                    path_manager.add_raw_point(i, orig_center)
+                
+                if progress_callback and i % 5 == 0: # UI update every 5 frames
                     progress_callback(i / self.total_frames, f"AI Tracking frame {i}/{self.total_frames}")
             detector.close()
             
+            # Cache the results
+            # Let's save the internal points mapping
+            cache_manager.save_tracking_data(video_hash, mode, {"raw_points": list(path_manager.raw_points.items())})
+            
         elif mode == "Manual Camera Tracking" and bbox:
             tracker = ManualTracker()
-            detector = PoseDetector() # AI assistance
+            detector = PoseDetector()
             
             ret, first_frame = self.cap.read()
             if not ret:
                 return path_manager
                 
             tracker.init_tracker(first_frame, bbox)
-            # Add first point
             x, y, w, h = bbox
             path_manager.add_raw_point(0, {"x": x + w/2, "y": y + h/2, "bbox_w": w, "bbox_h": h})
             
@@ -66,28 +106,30 @@ class VideoProcessor:
                 if not ret:
                     break
                 
-                # 1. Update Manual Tracker
+                # Manual tracking still needs full/decent res
                 success_manual, manual_data = tracker.update(frame)
                 
-                # 2. Update with AI Assistance
-                # Try to find a pose in the whole frame
-                _, ai_data = detector.find_pose(frame, draw=False)
+                # AI assistance can be low-res
+                if scale < 1.0:
+                    small_frame = cv2.resize(frame, (0, 0), fx=scale, fy=scale)
+                else:
+                    small_frame = frame
+                
+                _, ai_data = detector.find_pose(small_frame, draw=False)
+                if ai_data:
+                    ai_data['x'] /= scale
+                    ai_data['y'] /= scale
                 
                 final_center = None
                 if ai_data and success_manual:
-                    # Check if AI center is roughly within the manual box (leeway 1.5x box size)
                     mx, my = manual_data['x'], manual_data['y']
                     ax, ay = ai_data['x'], ai_data['y']
                     dist = ((mx - ax)**2 + (my - ay)**2)**0.5
-                    
-                    # If AI center is close to manual box, trust AI (it's smoother/more centered)
                     if dist < max(manual_data['bbox_w'], manual_data['bbox_h']):
                         final_center = ai_data
                     else:
                         final_center = manual_data
                 elif ai_data:
-                    # Manual failed, but AI found someone? 
-                    # If they were close to the last known position, re-identify
                     final_center = ai_data
                 else:
                     final_center = manual_data
@@ -95,10 +137,9 @@ class VideoProcessor:
                 if final_center:
                     path_manager.add_raw_point(i, final_center)
                 elif not success_manual:
-                    # Both failed
                     break
                 
-                if progress_callback:
+                if progress_callback and i % 5 == 0:
                     progress_callback(i / self.total_frames, f"AI-Assisted Tracking frame {i}/{self.total_frames}")
             detector.close()
                     
@@ -153,55 +194,54 @@ class VideoProcessor:
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         output_filename = os.path.join(self.output_dir, "tracked_output.mp4")
         
-        for i in range(self.total_frames):
-            ret, frame = self.cap.read()
-            if not ret:
-                break
-                
-            center_x, center_y = smoothed_path[i] if i < len(smoothed_path) else smoothed_path[-1]
+        # Parallel Execution
+        executor = self.device_manager.get_thread_pool()
+        
+        def process_and_save(i, frame, path_data, target_dims, zoom):
+            center_x, center_y = path_data
+            target_w, target_h = target_dims
             
-            # Smart Crop Logic
-            # Calculate current crop box based on zoom_factor
-            # Base zoom: how much of the original height/width we use
-            crop_h = self.height / zoom_factor
+            crop_h = self.height / zoom
             crop_w = crop_h * (target_w / target_h)
-            
             if crop_w > self.width:
                 crop_w = self.width
                 crop_h = crop_w * (target_h / target_w)
                 
-            # Center the crop box on (center_x, center_y)
             x1 = int(center_x - crop_w / 2)
             y1 = int(center_y - crop_h / 2)
             x2 = int(x1 + crop_w)
             y2 = int(y1 + crop_h)
             
-            # Clamp to frame boundaries
-            if x1 < 0:
-                dx = -x1
-                x1 += dx; x2 += dx
-            if y1 < 0:
-                dy = -y1
-                y1 += dy; y2 += dy
-            if x2 > self.width:
-                dx = x2 - self.width
-                x1 -= dx; x2 -= dx
-            if y2 > self.height:
-                dy = y2 - self.height
-                y1 -= dy; y2 -= dy
+            if x1 < 0: dx = -x1; x1 += dx; x2 += dx
+            if y1 < 0: dy = -y1; y1 += dy; y2 += dy
+            if x2 > self.width: dx = x2 - self.width; x1 -= dx; x2 -= dx
+            if y2 > self.height: dy = y2 - self.height; y1 -= dy; y2 -= dy
                 
-            # Crop and resize
             cropped = frame[max(0, y1):min(self.height, y2), max(0, x1):min(self.width, x2)]
-            if cropped.size == 0:
-                cropped = frame # Fallback
-                
+            if cropped.size == 0: cropped = frame
             processed = cv2.resize(cropped, (target_w, target_h))
             
             frame_name = os.path.join(self.temp_frames_dir, f"{i:06d}.jpg")
             cv2.imwrite(frame_name, processed, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            return i
+
+        futures = []
+        for i in range(self.total_frames):
+            ret, frame = self.cap.read()
+            if not ret: break
             
-            if progress_callback:
-                progress_callback((i + 1) / self.total_frames, f"Rendering frame {i + 1}/{self.total_frames}")
+            p_data = smoothed_path[i] if i < len(smoothed_path) else smoothed_path[-1]
+            futures.append(executor.submit(process_and_save, i, frame, p_data, (target_w, target_h), zoom_factor))
+            
+            if len(futures) > 20: # Maintain a buffer to avoid OOM
+                for future in concurrent.futures.as_completed(futures[:10]):
+                    res = future.result()
+                    if progress_callback:
+                        progress_callback(res / self.total_frames, f"Rendering frame {res}/{self.total_frames}")
+                futures = futures[10:]
+
+        for future in concurrent.futures.as_completed(futures):
+            future.result()
 
         # 5. Extract audio and Export
         if progress_callback:
@@ -280,16 +320,22 @@ class VideoProcessor:
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         output_filename = os.path.join(self.output_dir, "enhanced_output.mp4")
         
-        for i in range(self.total_frames):
-            ret, frame = self.cap.read()
-            if not ret:
-                break
-                
-            center_x, center_y = smoothed_path[i] if i < len(smoothed_path) else smoothed_path[-1]
+        # Smart Enhancement Analysis
+        manager.analyze_and_refine_settings(
+            input_res=(self.width, self.height),
+            crop_res=(self.width/zoom_factor, self.height/zoom_factor),
+            target_res=(target_w, target_h),
+            fps=self.fps
+        )
+        
+        executor = self.device_manager.get_thread_pool()
+        
+        def enhance_and_save(i, frame, path_data, target_dims, zoom):
+            center_x, center_y = path_data
+            target_w, target_h = target_dims
             
-            crop_h = self.height / zoom_factor
+            crop_h = self.height / zoom
             crop_w = crop_h * (target_w / target_h)
-            
             if crop_w > self.width:
                 crop_w = self.width
                 crop_h = crop_w * (target_h / target_w)
@@ -299,7 +345,6 @@ class VideoProcessor:
             x2 = int(x1 + crop_w)
             y2 = int(y1 + crop_h)
             
-            # Clamp
             if x1 < 0: dx = -x1; x1 += dx; x2 += dx
             if y1 < 0: dy = -y1; y1 += dy; y2 += dy
             if x2 > self.width: dx = x2 - self.width; x1 -= dx; x2 -= dx
@@ -309,15 +354,29 @@ class VideoProcessor:
             if cropped.size == 0: cropped = frame
             
             resized = cv2.resize(cropped, (target_w, target_h))
-            
-            # --- Enhancement Step ---
             processed = manager.process_frame(resized)
             
             frame_name = os.path.join(self.temp_frames_dir, f"{i:06d}.jpg")
             cv2.imwrite(frame_name, processed, [cv2.IMWRITE_JPEG_QUALITY, 98])
+            return i
+
+        futures = []
+        for i in range(self.total_frames):
+            ret, frame = self.cap.read()
+            if not ret: break
             
-            if progress_callback:
-                progress_callback((i + 1) / self.total_frames, f"Enhancing & Rendering frame {i + 1}/{self.total_frames}")
+            p_data = smoothed_path[i] if i < len(smoothed_path) else smoothed_path[-1]
+            futures.append(executor.submit(enhance_and_save, i, frame, p_data, (target_w, target_h), zoom_factor))
+            
+            if len(futures) > 10: # More intensive, keep buffer smaller
+                for future in concurrent.futures.as_completed(futures[:5]):
+                    res = future.result()
+                    if progress_callback:
+                        progress_callback(res / self.total_frames, f"Enhancing & Rendering frame {res}/{self.total_frames}")
+                futures = futures[5:]
+
+        for future in concurrent.futures.as_completed(futures):
+            future.result()
 
         # 4. Extract audio and Export
         audio_temp = os.path.join(self.output_dir, "temp_audio.aac")

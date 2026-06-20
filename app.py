@@ -16,6 +16,10 @@ if not ffmpeg_available:
 from tracker.video_processor import VideoProcessor
 from tracker.camera_path import CameraPath
 from enhancement.quality_analyzer import QualityAnalyzer
+from utils.device_manager import device_manager
+from utils.cache_manager import cache_manager
+import threading
+import queue
 
 # Cleanup at startup
 if 'initialized' not in st.session_state:
@@ -66,6 +70,10 @@ if 'manual_bbox' not in st.session_state:
     st.session_state.manual_bbox = None
 if 'processed_video' not in st.session_state:
     st.session_state.processed_video = None
+if 'export_status' not in st.session_state:
+    st.session_state.export_status = {"running": False, "progress": 0, "message": "", "output": None}
+if 'performance_stats' not in st.session_state:
+    st.session_state.performance_stats = {"cpu": 0, "mem": 0, "gpu": "None"}
 
 # Sidebar - Settings
 st.sidebar.title("⚙️ Settings")
@@ -112,8 +120,24 @@ with st.sidebar.expander("✨ Enhanced Export Settings", expanded=False):
         "enable_ai_upscaling": e_upscale,
         "enable_face_enhancement": e_face,
         "enable_motion_smoothing": e_motion,
-        "export_codec": e_codec
+        "export_codec": e_codec,
+        "preset": "fast" if preset == "FAST" else "medium"
     }
+
+# Sidebar - Performance Dashboard
+st.sidebar.divider()
+st.sidebar.subheader("🚀 Performance Dashboard")
+gpu_info = device_manager.get_gpu_info()
+st.sidebar.write(f"**GPU:** {gpu_info['gpu_type'] or 'None'}")
+st.sidebar.write(f"**Acceleration:** {'Enabled' if gpu_info['device'] != 'cpu' else 'CPU Only'}")
+
+if st.sidebar.button("📊 Update Stats"):
+    st.session_state.performance_stats = device_manager.get_system_stats()
+
+stats = st.session_state.performance_stats
+cols = st.sidebar.columns(2)
+cols[0].metric("CPU", f"{stats['cpu_usage']}%")
+cols[1].metric("Memory", f"{stats['memory_usage']}%")
 
 # Main UI
 st.title("💃 SravsDanceTrack AI")
@@ -155,42 +179,60 @@ if uploaded_file:
     # Mode Specific UI
     if tracking_mode == "AI Auto Tracking":
         st.info("AI will automatically detect the dancer using Pose estimation.")
-        col_btn1, col_btn2 = st.columns(2)
+        col_btn1, col_btn2, col_btn3 = st.columns(3)
         
-        if col_btn1.button("🚀 Standard Export"):
-            processor = VideoProcessor(st.session_state.video_path)
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            def update_progress(p, t): progress_bar.progress(p); status_text.text(t)
+        def run_export_thread(proc, mode, settings=None, is_enhanced=False, bbox=None):
+            st.session_state.export_status["running"] = True
+            def update(p, m):
+                st.session_state.export_status["progress"] = p
+                st.session_state.export_status["message"] = m
             
-            path_manager = processor.process_tracking(tracking_mode, progress_callback=update_progress)
-            output_file = processor.generate_virtual_camera(
-                path_manager, aspect_ratio=aspect_ratio, zoom_factor=zoom_factor, 
-                smoothness=smoothness, smoothing_method=smoothing_method, 
-                progress_callback=update_progress
-            )
-            if output_file:
-                st.session_state.processed_video = output_file
-                st.success("✅ Video Processed (Standard)!")
-                st.rerun()
+            try:
+                path_manager = proc.process_tracking(mode, progress_callback=update, bbox=bbox)
+                if is_enhanced:
+                    out = proc.generate_enhanced_video(path_manager, aspect_ratio=aspect_ratio, zoom_factor=zoom_factor, 
+                                                    smoothness=smoothness, smoothing_method=smoothing_method, 
+                                                    enhance_settings=settings, progress_callback=update)
+                else:
+                    out = proc.generate_virtual_camera(path_manager, aspect_ratio=aspect_ratio, zoom_factor=zoom_factor, 
+                                                    smoothness=smoothness, smoothing_method=smoothing_method, 
+                                                    progress_callback=update)
+                st.session_state.export_status["output"] = out
+                st.session_state.export_status["message"] = "Done!"
+            except Exception as e:
+                st.session_state.export_status["message"] = f"Error: {str(e)}"
+            finally:
+                st.session_state.export_status["running"] = False
+
+        if col_btn1.button("🚀 Fast Export (No AI)"):
+            processor = VideoProcessor(st.session_state.video_path)
+            threading.Thread(target=run_export_thread, args=(processor, tracking_mode)).start()
+            st.toast("Export started in background!")
 
         if col_btn2.button("✨ Enhanced Export"):
             processor = VideoProcessor(st.session_state.video_path)
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            def update_progress(p, t): progress_bar.progress(p); status_text.text(t)
+            threading.Thread(target=run_export_thread, args=(processor, tracking_mode, enhance_params, True)).start()
+            st.toast("Enhanced export started in background!")
             
-            path_manager = processor.process_tracking(tracking_mode, progress_callback=update_progress)
-            output_file = processor.generate_enhanced_video(
-                path_manager, aspect_ratio=aspect_ratio, zoom_factor=zoom_factor, 
-                smoothness=smoothness, smoothing_method=smoothing_method, 
-                enhance_settings=enhance_params,
-                progress_callback=update_progress
-            )
-            if output_file:
-                st.session_state.processed_video = output_file
-                st.success("✅ Video Processed (Enhanced)!")
-                st.rerun()
+        if col_btn3.button("📽️ Quick Preview"):
+            processor = VideoProcessor(st.session_state.video_path)
+            # Preview is fast, so we might run it sync or in thread
+            path_manager = processor.process_tracking(tracking_mode)
+            # Use specific dims for preview
+            preview_file = processor.generate_virtual_camera(path_manager, aspect_ratio=aspect_ratio, zoom_factor=zoom_factor, 
+                                                            smoothness=smoothness, smoothing_method=smoothing_method)
+            st.session_state.processed_video = preview_file
+            st.rerun()
+
+        # Export Progress UI
+        if st.session_state.export_status["running"]:
+            st.info(f"⏳ Background Export: {st.session_state.export_status['message']}")
+            st.progress(st.session_state.export_status["progress"])
+        elif st.session_state.export_status["output"]:
+            st.success("✅ Export Complete!")
+            st.session_state.processed_video = st.session_state.export_status["output"]
+            st.session_state.export_status["output"] = None
+            st.rerun()
 
     elif tracking_mode == "Manual Camera Tracking":
         st.info("Select a target in the first frame to track.")
