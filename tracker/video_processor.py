@@ -7,6 +7,8 @@ from tracker.manual_tracker import ManualTracker
 from tracker.camera_path import CameraPath
 from utils.smoothing import SmoothingUtils
 from utils.ffmpeg_export import FFMPEGExport
+from enhancement.enhancement_manager import EnhancementManager
+from enhancement.motion_smoothing import MotionSmoothingModule
 
 class VideoProcessor:
     def __init__(self, video_path: str, output_dir: str = "outputs"):
@@ -226,6 +228,123 @@ class VideoProcessor:
                 progress_callback(1.0, "Export Failed in FFmpeg phase.")
         
         # Cleanup
+        if os.path.exists(audio_temp):
+            os.remove(audio_temp)
+            
+        self.cap.release()
+        return output_filename if success else ""
+
+    def generate_enhanced_video(self, path_manager: CameraPath, 
+                                 aspect_ratio: str = "9:16",
+                                 zoom_factor: float = 1.2,
+                                 smoothness: float = 0.9,
+                                 smoothing_method: str = "savgol",
+                                 interpolation_method: str = "cubic",
+                                 is_keyframe_mode: bool = False,
+                                 enhance_settings: dict = None,
+                                 progress_callback: Callable = None) -> str:
+        """Generates the final video with virtual camera movement and enhancement modules."""
+        
+        # 1. Get path and smoothing (same as standard)
+        if is_keyframe_mode:
+            raw_path = path_manager.interpolate_keyframes(method=interpolation_method)
+        else:
+            raw_path = path_manager.get_raw_path()
+            
+        if not raw_path:
+            return ""
+            
+        window_size = int(max(3, (1 - smoothness) * 100))
+        if window_size % 2 == 0: window_size += 1
+        smoothed_path = SmoothingUtils.smooth_path(raw_path, window_size=window_size, method=smoothing_method)
+        
+        if not smoothed_path:
+            smoothed_path = [(self.width/2, self.height/2)] * self.total_frames
+        else:
+            new_path = []
+            last_valid = (self.width/2, self.height/2)
+            for x, y in smoothed_path:
+                if np.isnan(x) or np.isnan(y):
+                    new_path.append(last_valid)
+                else:
+                    last_valid = (x, y)
+                    new_path.append(last_valid)
+            smoothed_path = new_path
+        
+        target_w, target_h = self._get_target_dims(aspect_ratio)
+        
+        # 2. Initialize Enhancement Manager
+        manager = EnhancementManager(enhance_settings or {})
+        
+        # 3. Render and Enhance frames
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        output_filename = os.path.join(self.output_dir, "enhanced_output.mp4")
+        
+        for i in range(self.total_frames):
+            ret, frame = self.cap.read()
+            if not ret:
+                break
+                
+            center_x, center_y = smoothed_path[i] if i < len(smoothed_path) else smoothed_path[-1]
+            
+            crop_h = self.height / zoom_factor
+            crop_w = crop_h * (target_w / target_h)
+            
+            if crop_w > self.width:
+                crop_w = self.width
+                crop_h = crop_w * (target_h / target_w)
+                
+            x1 = int(center_x - crop_w / 2)
+            y1 = int(center_y - crop_h / 2)
+            x2 = int(x1 + crop_w)
+            y2 = int(y1 + crop_h)
+            
+            # Clamp
+            if x1 < 0: dx = -x1; x1 += dx; x2 += dx
+            if y1 < 0: dy = -y1; y1 += dy; y2 += dy
+            if x2 > self.width: dx = x2 - self.width; x1 -= dx; x2 -= dx
+            if y2 > self.height: dy = y2 - self.height; y1 -= dy; y2 -= dy
+                
+            cropped = frame[max(0, y1):min(self.height, y2), max(0, x1):min(self.width, x2)]
+            if cropped.size == 0: cropped = frame
+            
+            resized = cv2.resize(cropped, (target_w, target_h))
+            
+            # --- Enhancement Step ---
+            processed = manager.process_frame(resized)
+            
+            frame_name = os.path.join(self.temp_frames_dir, f"{i:06d}.jpg")
+            cv2.imwrite(frame_name, processed, [cv2.IMWRITE_JPEG_QUALITY, 98])
+            
+            if progress_callback:
+                progress_callback((i + 1) / self.total_frames, f"Enhancing & Rendering frame {i + 1}/{self.total_frames}")
+
+        # 4. Extract audio and Export
+        audio_temp = os.path.join(self.output_dir, "temp_audio.aac")
+        FFMPEGExport.extract_audio(self.video_path, audio_temp)
+        
+        codec = enhance_settings.get('export_codec', 'libx264')
+        if codec == 'H265': codec = 'libx265'
+        else: codec = 'libx264'
+        
+        success = FFMPEGExport.export_video(
+            input_video=self.video_path,
+            frames_dir=self.temp_frames_dir,
+            output_path=output_filename,
+            fps=self.fps,
+            audio_source=audio_temp if os.path.exists(audio_temp) else None
+            # Future: add codec support to export_video if needed
+        )
+        
+        # 5. Optional Motion Smoothing (60 FPS)
+        if success and enhance_settings.get('enable_motion_smoothing'):
+            if progress_callback:
+                progress_callback(0.99, "Applying Motion Smoothing (RIFE placeholder)...")
+            
+            smooth_output = os.path.join(self.output_dir, "smoothed_enhanced_output.mp4")
+            if MotionSmoothingModule.apply_ffmpeg_interpolation(output_filename, smooth_output):
+                output_filename = smooth_output
+        
         if os.path.exists(audio_temp):
             os.remove(audio_temp)
             

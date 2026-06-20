@@ -15,6 +15,7 @@ if not ffmpeg_available:
     st.info("Download FFmpeg from [ffmpeg.org](https://ffmpeg.org/download.html)")
 from tracker.video_processor import VideoProcessor
 from tracker.camera_path import CameraPath
+from enhancement.quality_analyzer import QualityAnalyzer
 
 # Cleanup at startup
 if 'initialized' not in st.session_state:
@@ -83,6 +84,37 @@ if tracking_mode == "Manual Keyframe Camera Mode":
 else:
     interpolation = "linear"
 
+st.sidebar.divider()
+with st.sidebar.expander("✨ Enhanced Export Settings", expanded=False):
+    preset = st.selectbox("Quality Preset", ["FAST", "HIGH QUALITY", "AI ENHANCED", "PREMIUM CINEMATIC"])
+    
+    # Defaults based on preset
+    def_denoise = preset in ["HIGH QUALITY", "AI ENHANCED", "PREMIUM CINEMATIC"]
+    def_sharpen = preset in ["HIGH QUALITY", "AI ENHANCED", "PREMIUM CINEMATIC"]
+    def_color = preset in ["HIGH QUALITY", "AI ENHANCED", "PREMIUM CINEMATIC"]
+    def_upscale = preset in ["AI ENHANCED", "PREMIUM CINEMATIC"]
+    def_face = preset == "PREMIUM CINEMATIC"
+    def_motion = preset == "PREMIUM CINEMATIC"
+    def_codec = "H265" if preset == "PREMIUM CINEMATIC" else "H264"
+
+    e_denoise = st.checkbox("Enable Denoising", value=def_denoise)
+    e_sharpen = st.checkbox("Enable Sharpening", value=def_sharpen)
+    e_color = st.checkbox("Enable Color Enhancement", value=def_color)
+    e_upscale = st.checkbox("Enable AI Upscaling", value=def_upscale)
+    e_face = st.checkbox("Enable Face Enhancement", value=def_face)
+    e_motion = st.checkbox("Enable Motion Smoothing", value=def_motion)
+    e_codec = st.radio("Export Codec", ["H264", "H265"], index=0 if def_codec == "H264" else 1)
+    
+    enhance_params = {
+        "enable_denoising": e_denoise,
+        "enable_sharpening": e_sharpen,
+        "enable_color_enhancement": e_color,
+        "enable_ai_upscaling": e_upscale,
+        "enable_face_enhancement": e_face,
+        "enable_motion_smoothing": e_motion,
+        "export_codec": e_codec
+    }
+
 # Main UI
 st.title("💃 SravsDanceTrack AI")
 st.subheader("Keep your dancer centered with AI-powered virtual camera movement")
@@ -107,18 +139,29 @@ if uploaded_file:
     col2.metric("FPS", f"{meta['fps']:.2f}")
     col3.metric("Duration", meta['duration'])
 
+    # Quality Estimation Panel
+    if meta:
+        # Approximate current crop dims
+        crop_h = meta['height'] / zoom_factor
+        crop_w = crop_h * (720/1280 if aspect_ratio == "9:16" else 1280/720 if aspect_ratio == "16:9" else 1)
+        target_w, target_h = (720, 1280) if aspect_ratio == "9:16" else (1280, 720) if aspect_ratio == "16:9" else (1080, 1080)
+        
+        quality = QualityAnalyzer.estimate_quality(crop_w, crop_h, target_w, target_h)
+        with st.expander("📊 Estimated Output Quality", expanded=True):
+            st.markdown(f"**Current Rating:** :{quality['color']}[{quality['rating']}]")
+            st.write(f"**Zoom Level:** {quality['zoom_level']}")
+            st.info(f"💡 {quality['suggestion']}")
+
     # Mode Specific UI
     if tracking_mode == "AI Auto Tracking":
         st.info("AI will automatically detect the dancer using Pose estimation.")
-        if st.button("🚀 Start AI Tracking & Process"):
+        col_btn1, col_btn2 = st.columns(2)
+        
+        if col_btn1.button("🚀 Standard Export"):
             processor = VideoProcessor(st.session_state.video_path)
-            
             progress_bar = st.progress(0)
             status_text = st.empty()
-            
-            def update_progress(progress, text):
-                progress_bar.progress(progress)
-                status_text.text(text)
+            def update_progress(p, t): progress_bar.progress(p); status_text.text(t)
             
             path_manager = processor.process_tracking(tracking_mode, progress_callback=update_progress)
             output_file = processor.generate_virtual_camera(
@@ -126,16 +169,28 @@ if uploaded_file:
                 smoothness=smoothness, smoothing_method=smoothing_method, 
                 progress_callback=update_progress
             )
-            
             if output_file:
                 st.session_state.processed_video = output_file
-                st.success("✅ Video Processed Successfully!")
+                st.success("✅ Video Processed (Standard)!")
                 st.rerun()
-            else:
-                st.error("❌ Export Failed in FFmpeg phase.")
-                if os.path.exists("ffmpeg_error.log"):
-                    with open("ffmpeg_error.log", "r") as f:
-                        st.code(f.read(), language="text")
+
+        if col_btn2.button("✨ Enhanced Export"):
+            processor = VideoProcessor(st.session_state.video_path)
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            def update_progress(p, t): progress_bar.progress(p); status_text.text(t)
+            
+            path_manager = processor.process_tracking(tracking_mode, progress_callback=update_progress)
+            output_file = processor.generate_enhanced_video(
+                path_manager, aspect_ratio=aspect_ratio, zoom_factor=zoom_factor, 
+                smoothness=smoothness, smoothing_method=smoothing_method, 
+                enhance_settings=enhance_params,
+                progress_callback=update_progress
+            )
+            if output_file:
+                st.session_state.processed_video = output_file
+                st.success("✅ Video Processed (Enhanced)!")
+                st.rerun()
 
     elif tracking_mode == "Manual Camera Tracking":
         st.info("Select a target in the first frame to track.")
@@ -161,33 +216,41 @@ if uploaded_file:
                 bx, by, bw, bh = box['left'], box['top'], box['width'], box['height']
                 st.write(f"Selected Area: X={bx}, Y={by}, W={bw}, H={bh}")
             
-            if st.button("🚀 Start Manual Tracking & Process"):
+            col_m1, col_m2 = st.columns(2)
+            if col_m1.button("🚀 Standard Export"):
                 bbox = (int(bx), int(by), int(bw), int(bh))
                 processor = VideoProcessor(st.session_state.video_path)
-                
                 progress_bar = st.progress(0)
                 status_text = st.empty()
-                
-                def update_progress(progress, text):
-                    progress_bar.progress(progress)
-                    status_text.text(text)
-                
+                def update_progress(p, t): progress_bar.progress(p); status_text.text(t)
                 path_manager = processor.process_tracking(tracking_mode, progress_callback=update_progress, bbox=bbox)
                 output_file = processor.generate_virtual_camera(
                     path_manager, aspect_ratio=aspect_ratio, zoom_factor=zoom_factor, 
                     smoothness=smoothness, smoothing_method=smoothing_method, 
                     progress_callback=update_progress
                 )
-                
                 if output_file:
                     st.session_state.processed_video = output_file
-                    st.success("✅ Video Processed Successfully!")
+                    st.success("✅ Video Processed (Standard)!")
                     st.rerun()
-                else:
-                    st.error("❌ Export Failed in FFmpeg phase.")
-                    if os.path.exists("ffmpeg_error.log"):
-                        with open("ffmpeg_error.log", "r") as f:
-                            st.code(f.read(), language="text")
+
+            if col_m2.button("✨ Enhanced Export"):
+                bbox = (int(bx), int(by), int(bw), int(bh))
+                processor = VideoProcessor(st.session_state.video_path)
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                def update_progress(p, t): progress_bar.progress(p); status_text.text(t)
+                path_manager = processor.process_tracking(tracking_mode, progress_callback=update_progress, bbox=bbox)
+                output_file = processor.generate_enhanced_video(
+                    path_manager, aspect_ratio=aspect_ratio, zoom_factor=zoom_factor, 
+                    smoothness=smoothness, smoothing_method=smoothing_method, 
+                    enhance_settings=enhance_params,
+                    progress_callback=update_progress
+                )
+                if output_file:
+                    st.session_state.processed_video = output_file
+                    st.success("✅ Video Processed (Enhanced)!")
+                    st.rerun()
 
     elif tracking_mode == "Manual Keyframe Camera Mode":
         st.info("Add keyframes at different time points to define the camera path.")
@@ -226,7 +289,8 @@ if uploaded_file:
                 else:
                     st.write("No keyframes added yet.")
 
-        if st.button("🚀 Process Keyframe Path"):
+        col_k1, col_k2 = st.columns(2)
+        if col_k1.button("🚀 Standard Export"):
             if len(st.session_state.keyframes) < 2:
                 st.error("Please add at least 2 keyframes.")
             else:
@@ -237,10 +301,7 @@ if uploaded_file:
                 
                 progress_bar = st.progress(0)
                 status_text = st.empty()
-                
-                def update_progress(progress, text):
-                    progress_bar.progress(progress)
-                    status_text.text(text)
+                def update_progress(p, t): progress_bar.progress(p); status_text.text(t)
                 
                 output_file = processor.generate_virtual_camera(
                     path_manager, aspect_ratio=aspect_ratio, zoom_factor=zoom_factor, 
@@ -248,16 +309,36 @@ if uploaded_file:
                     interpolation_method=interpolation, is_keyframe_mode=True,
                     progress_callback=update_progress
                 )
-                
                 if output_file:
                     st.session_state.processed_video = output_file
-                    st.success("✅ Video Processed Successfully!")
+                    st.success("✅ Video Processed (Standard)!")
                     st.rerun()
-                else:
-                    st.error("❌ Export Failed in FFmpeg phase.")
-                    if os.path.exists("ffmpeg_error.log"):
-                        with open("ffmpeg_error.log", "r") as f:
-                            st.code(f.read(), language="text")
+
+        if col_k2.button("✨ Enhanced Export"):
+            if len(st.session_state.keyframes) < 2:
+                st.error("Please add at least 2 keyframes.")
+            else:
+                processor = VideoProcessor(st.session_state.video_path)
+                path_manager = CameraPath(meta['frame_count'])
+                for kf in st.session_state.keyframes:
+                    path_manager.add_keyframe(kf['frame'], kf['x'], kf['y'])
+                
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                def update_progress(p, t): progress_bar.progress(p); status_text.text(t)
+                
+                output_file = processor.generate_enhanced_video(
+                    path_manager, aspect_ratio=aspect_ratio, zoom_factor=zoom_factor, 
+                    smoothness=smoothness, 
+                    smoothing_method=smoothing_method, 
+                    enhance_settings=enhance_params,
+                    interpolation_method=interpolation, is_keyframe_mode=True,
+                    progress_callback=update_progress
+                )
+                if output_file:
+                    st.session_state.processed_video = output_file
+                    st.success("✅ Video Processed (Enhanced)!")
+                    st.rerun()
 
 # Preview Section
 if st.session_state.processed_video:
