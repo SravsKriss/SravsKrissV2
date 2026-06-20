@@ -67,21 +67,21 @@ class DeviceManager:
 
     @staticmethod
     def get_system_stats():
-        """Returns current system resource usage."""
+        """Returns current system resource usage with cross-platform support."""
         stats = {
             "cpu_usage": 0,
             "memory_usage": 0,
             "gpu_usage": 0
         }
         try:
-            # Simple way to get some stats on Windows without psutil if not available
-            # We can use 'wmic' or 'typeperf' or just placeholders if needed
-            # For now, let's just return what we can easily
-            if platform.system() == "Windows":
+            sys_type = platform.system()
+            if sys_type == "Windows":
                 # CPU
                 cpu_cmd = "wmic cpu get loadpercentage"
                 cpu_out = subprocess.check_output(cpu_cmd, shell=True).decode()
-                stats["cpu_usage"] = int(cpu_out.split("\n")[1].strip())
+                lines = [l.strip() for l in cpu_out.splitlines() if l.strip()]
+                if len(lines) > 1:
+                    stats["cpu_usage"] = int(lines[1])
                 
                 # Mem
                 mem_cmd = "wmic OS get FreePhysicalMemory,TotalVisibleMemorySize /Value"
@@ -90,6 +90,20 @@ class DeviceManager:
                 total = int(mem_data["TotalVisibleMemorySize"])
                 free = int(mem_data["FreePhysicalMemory"])
                 stats["memory_usage"] = int(((total - free) / total) * 100)
+                
+            elif sys_type == "Linux":
+                # CPU (from /proc/loadavg - 1 min load / cpu_count)
+                with open("/proc/loadavg", "r") as f:
+                    load = float(f.read().split()[0])
+                stats["cpu_usage"] = min(100, int((load / os.cpu_count()) * 100))
+                
+                # Mem
+                with open("/proc/meminfo", "r") as f:
+                    meminfo = {line.split(":")[0]: line.split(":")[1].strip() for line in f}
+                total = int(meminfo["MemTotal"].split()[0])
+                free = int(meminfo["MemAvailable"].split()[0]) # MemAvailable is better than MemFree
+                stats["memory_usage"] = int(((total - free) / total) * 100)
+                
         except Exception:
             pass
         return stats

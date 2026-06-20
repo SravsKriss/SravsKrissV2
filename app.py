@@ -73,7 +73,7 @@ if 'processed_video' not in st.session_state:
 if 'export_status' not in st.session_state:
     st.session_state.export_status = {"running": False, "progress": 0, "message": "", "output": None}
 if 'performance_stats' not in st.session_state:
-    st.session_state.performance_stats = {"cpu": 0, "mem": 0, "gpu": "None"}
+    st.session_state.performance_stats = {"cpu_usage": 0, "memory_usage": 0, "gpu_usage": 0}
 
 # Sidebar - Settings
 st.sidebar.title("⚙️ Settings")
