@@ -217,14 +217,20 @@ if uploaded_file:
         col_btn1, col_btn2, col_btn3 = st.columns(3)
 
         if col_btn1.button("🚀 Fast Export (No AI)"):
+            st.session_state.export_status["running"] = True
+            st.session_state.export_status["message"] = "Initializing Fast Export..."
+            st.session_state.export_status["progress"] = 0
             processor = VideoProcessor(st.session_state.video_path)
             threading.Thread(target=run_export_thread, args=(processor, tracking_mode)).start()
-            st.toast("Export started in background!")
+            st.toast("Export started!")
 
         if col_btn2.button("✨ Enhanced Export"):
+            st.session_state.export_status["running"] = True
+            st.session_state.export_status["message"] = "Initializing Enhanced Export..."
+            st.session_state.export_status["progress"] = 0
             processor = VideoProcessor(st.session_state.video_path)
             threading.Thread(target=run_export_thread, args=(processor, tracking_mode, enhance_params, True)).start()
-            st.toast("Enhanced export started in background!")
+            st.toast("Enhanced export started!")
             
         if col_btn3.button("📽️ Quick Preview"):
             processor = VideoProcessor(st.session_state.video_path)
@@ -272,16 +278,22 @@ if uploaded_file:
             
             col_m1, col_m2 = st.columns(2)
             if col_m1.button("🚀 Standard Export"):
+                st.session_state.export_status["running"] = True
+                st.session_state.export_status["message"] = "Initializing Tracking..."
+                st.session_state.export_status["progress"] = 0
                 bbox = (int(bx), int(by), int(bw), int(bh))
                 processor = VideoProcessor(st.session_state.video_path)
                 threading.Thread(target=run_export_thread, args=(processor, tracking_mode, None, False, bbox)).start()
-                st.toast("Export started in background!")
+                st.toast("Export started!")
 
             if col_m2.button("✨ Enhanced Export"):
+                st.session_state.export_status["running"] = True
+                st.session_state.export_status["message"] = "Initializing Enhanced Export..."
+                st.session_state.export_status["progress"] = 0
                 bbox = (int(bx), int(by), int(bw), int(bh))
                 processor = VideoProcessor(st.session_state.video_path)
                 threading.Thread(target=run_export_thread, args=(processor, tracking_mode, enhance_params, True, bbox)).start()
-                st.toast("Enhanced export started in background!")
+                st.toast("Enhanced export started!")
 
     elif tracking_mode == "Manual Keyframe Camera Mode":
         st.info("Add keyframes at different time points to define the camera path.")
@@ -325,17 +337,23 @@ if uploaded_file:
             if len(st.session_state.keyframes) < 2:
                 st.error("Please add at least 2 keyframes.")
             else:
+                st.session_state.export_status["running"] = True
+                st.session_state.export_status["message"] = "Initializing Path..."
+                st.session_state.export_status["progress"] = 0
                 processor = VideoProcessor(st.session_state.video_path)
                 threading.Thread(target=run_export_thread, args=(processor, tracking_mode, None, False, None, st.session_state.keyframes)).start()
-                st.toast("Export started in background!")
+                st.toast("Export started!")
 
         if col_k2.button("✨ Enhanced Export"):
             if len(st.session_state.keyframes) < 2:
                 st.error("Please add at least 2 keyframes.")
             else:
+                st.session_state.export_status["running"] = True
+                st.session_state.export_status["message"] = "Initializing Enhanced Path..."
+                st.session_state.export_status["progress"] = 0
                 processor = VideoProcessor(st.session_state.video_path)
                 threading.Thread(target=run_export_thread, args=(processor, tracking_mode, enhance_params, True, None, st.session_state.keyframes)).start()
-                st.toast("Export started in background!")
+                st.toast("Export started!")
 
     # Unified Progress Bar & Completion Logic
     if st.session_state.export_status["running"]:
