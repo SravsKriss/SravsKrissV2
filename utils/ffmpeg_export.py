@@ -3,16 +3,11 @@ import os
 
 class FFMPEGExport:
     @staticmethod
-    def export_video(input_video: str, frames_dir: str, output_path: str, fps: float, 
-                     audio_source: str = None, preset: str = "medium", 
-                     codec: str = "H264", crf: int = 23):
-        """Combines frames and optional audio into a final video using FFmpeg with hardware acceleration."""
+    def export_video(input_video: str, frames_dir: str, output_path: str, fps: float, audio_source: str = None):
+        """Combines frames and optional audio into a final video using FFmpeg."""
         if not os.path.exists(frames_dir):
             return False
             
-        from utils.device_manager import device_manager
-        gpu_info = device_manager.get_gpu_info()
-        
         # Base command for inputs
         cmd = [
             'ffmpeg', '-y',
@@ -20,40 +15,30 @@ class FFMPEGExport:
             '-i', os.path.join(frames_dir, '%06d.jpg')
         ]
         
+        # If audio source is provided, add it as second input
         if audio_source and os.path.exists(audio_source):
             cmd.extend(['-i', audio_source])
             has_audio = True
         else:
             has_audio = False
             
-        # Determine Encoder
-        vcodec = "libx264"
-        if codec == "H265":
-            vcodec = "libx265"
-            
-        # Hardware Acceleration Check
-        hw_accel = False
-        if gpu_info['device'] == "cuda":
-            if codec == "H264": vcodec = "h264_nvenc"; hw_accel = True
-            elif codec == "H265": vcodec = "hevc_nvenc"; hw_accel = True
-        elif gpu_info['gpu_type'] == "DirectML": # Could try AMF or QSV
-            # Placeholder for AMF/QSV detection - for now fallback to CPU for safety unless user forces
-            pass
-
         # Encoding parameters
-        cmd.extend(['-c:v', vcodec])
-        
-        if hw_accel:
-            # NVENC uses constant quality with different flags
-            cmd.extend(['-rc:v', 'vbr', '-cq:v', str(crf), '-preset', preset if preset in ['slow', 'medium', 'fast'] else 'fast'])
-        else:
-            cmd.extend(['-preset', preset, '-crf', str(crf)])
-            
-        cmd.extend(['-pix_fmt', 'yuv420p'])
+        cmd.extend([
+            '-c:v', 'libx264',
+            '-preset', 'medium',
+            '-crf', '23',
+            '-pix_fmt', 'yuv420p'
+        ])
         
         if has_audio:
-            cmd.extend(['-c:a', 'aac', '-map', '0:v:0', '-map', '1:a:0', '-shortest'])
+            cmd.extend([
+                '-c:a', 'aac',
+                '-map', '0:v:0',
+                '-map', '1:a:0',
+                '-shortest'
+            ])
         else:
+            # No audio mapping needed
             cmd.extend(['-map', '0:v:0'])
             
         cmd.append(output_path)
